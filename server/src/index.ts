@@ -15,6 +15,12 @@ const io = new Server(httpServer, {
 io.on("connection", (socket) => {
   console.log("Un usuario se conectó:", socket.id);
 
+  // evento de prueba de chat
+  socket.on("mensaje", (data) => {
+    console.log(`Mensaje recibido: ${data}`);
+    io.emit("mensaje", data); // reenviar a todos
+  });
+
   socket.on("disconnect", () => {
     console.log("Un usuario se desconectó:", socket.id);
   });
