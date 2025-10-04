@@ -4,21 +4,25 @@ import { Server } from "socket.io";
 
 const app = express();
 const httpServer = createServer(app);
+
 const io = new Server(httpServer, {
   cors: {
-    origin: "http://localhost:5173", // nuestro cliente
+    origin: "*", // desarrollo: cualquier cliente puede conectarse
     methods: ["GET", "POST"],
   },
 });
 
-// evento cuando un cliente se conecta
 io.on("connection", (socket) => {
   console.log("Un usuario se conectó:", socket.id);
 
-  // evento de prueba de chat
-  socket.on("mensaje", (data) => {
-    console.log(`Mensaje recibido: ${data}`);
+  // Chat
+  socket.on("mensaje", (data: string) => {
     io.emit("mensaje", data); // reenviar a todos
+  });
+
+  // Dibujo: reenviar a todos excepto al que dibuja
+  socket.on("dibujo", (data: { x: number; y: number; type: "start" | "draw" }) => {
+    socket.broadcast.emit("dibujo", data);
   });
 
   socket.on("disconnect", () => {
