@@ -157,9 +157,62 @@ function App() {
       ctx.clearRect(0, 0, canvas.width, canvas.height);
     });
 
-    socket.on("juego_iniciado", (data: { palabra: string; turnoActual: string; tiempo: number }) => {
-      console.log("🎮 Juego iniciado desde servidor:", data);
-      // El juego ya está iniciado localmente, solo sincronizar si es necesario
+    socket.on("juego_iniciado", (data: { 
+      palabra: string; 
+      turnoActual: string; 
+      tiempo: number; 
+      usuarios: string[];
+      puntuaciones: { [usuario: string]: number };
+      ronda: number;
+    }) => {
+      try {
+        console.log("🎮 Juego iniciado desde servidor:", data);
+        
+        // Sincronizar el estado del juego en todos los clientes
+        setJuegoState(prev => ({
+          ...prev,
+          enJuego: true,
+          palabraActual: data.palabra,
+          palabraOculta: data.palabra.replace(/[a-zA-ZáéíóúÁÉÍÓÚñÑ]/g, '_'),
+          turnoActual: data.turnoActual,
+          tiempoRestante: data.tiempo,
+          puntuaciones: data.puntuaciones || {},
+          ronda: data.ronda || 1
+        }));
+        
+        // Iniciar el timer en todos los clientes
+        if (gameTimerRef.current) {
+          clearInterval(gameTimerRef.current);
+        }
+        
+        gameTimerRef.current = setInterval(() => {
+          setJuegoState(prev => {
+            if (prev.tiempoRestante <= 1) {
+              // Tiempo agotado - simplemente reiniciar el timer por ahora
+              return {
+                ...prev,
+                tiempoRestante: 60
+              };
+            }
+            
+            return {
+              ...prev,
+              tiempoRestante: prev.tiempoRestante - 1
+            };
+          });
+        }, 1000);
+        
+        // Mostrar mensaje de confirmación
+        setMensajes(prev => [...prev, {
+          id: Date.now().toString(),
+          usuario: 'Sistema',
+          texto: `🎮 ¡Juego iniciado! Es el turno de ${data.turnoActual} - Palabra: ${data.palabra.replace(/[a-zA-ZáéíóúÁÉÍÓÚñÑ]/g, '_')}`,
+          timestamp: new Date(),
+          color: '#6366f1'
+        }]);
+      } catch (error) {
+        console.error("Error al procesar juego_iniciado:", error);
+      }
     });
 
     socket.on("palabra_adivinada", (data: { usuario: string; palabra: string; puntos: number }) => {
@@ -171,6 +224,32 @@ function App() {
         texto: `🎉 ¡${data.usuario} adivinó "${data.palabra}" y ganó ${data.puntos} puntos!`,
         timestamp: new Date(),
         color: '#10b981'
+      }]);
+    });
+
+    socket.on("juego_terminado", () => {
+      console.log("🏁 Juego terminado");
+      setJuegoState(prev => ({
+        ...prev,
+        enJuego: false,
+        palabraActual: '',
+        palabraOculta: '',
+        turnoActual: '',
+        tiempoRestante: 0
+      }));
+      
+      // Limpiar timer
+      if (gameTimerRef.current) {
+        clearInterval(gameTimerRef.current);
+        gameTimerRef.current = null;
+      }
+      
+      setMensajes(prev => [...prev, {
+        id: Date.now().toString(),
+        usuario: 'Sistema',
+        texto: '🏁 ¡Juego terminado! Pueden iniciar un nuevo juego.',
+        timestamp: new Date(),
+        color: '#f59e0b'
       }]);
     });
 
@@ -418,81 +497,34 @@ function App() {
 
   // Funciones del juego
   const iniciarJuego = () => {
-    if (usuariosConectados.length < 2) {
-      alert('Se necesitan al menos 2 jugadores para iniciar el juego');
-      return;
+    try {
+      if (usuariosConectados.length < 2) {
+        alert('Se necesitan al menos 2 jugadores para iniciar el juego');
+        return;
+      }
+      
+      const palabraAleatoria = palabrasRef.current[Math.floor(Math.random() * palabrasRef.current.length)];
+      
+      setMostrarConfigJuego(false);
+      
+      // Limpiar canvas al iniciar juego
+      limpiarCanvas();
+      
+      // Notificar al servidor - el servidor se encargará de sincronizar a todos
+      socketRef.current?.emit('iniciar_juego', {
+        palabra: palabraAleatoria,
+        turnoActual: usuariosConectados[0].nombre,
+        tiempo: 60,
+        usuarios: usuariosConectados.map(u => u.nombre)
+      });
+      
+      console.log("🎮 Iniciando juego con palabra:", palabraAleatoria);
+    } catch (error) {
+      console.error("Error al iniciar juego:", error);
+      alert("Error al iniciar el juego. Inténtalo de nuevo.");
     }
-    
-    const palabraAleatoria = palabrasRef.current[Math.floor(Math.random() * palabrasRef.current.length)];
-    const palabraOculta = palabraAleatoria.replace(/[a-zA-ZáéíóúÁÉÍÓÚñÑ]/g, '_');
-    
-    setJuegoState(prev => ({
-      ...prev,
-      enJuego: true,
-      palabraActual: palabraAleatoria,
-      palabraOculta,
-      turnoActual: usuariosConectados[0].nombre,
-      tiempoRestante: 60,
-      puntuaciones: usuariosConectados.reduce((acc, user) => ({ ...acc, [user.nombre]: 0 }), {}),
-      ronda: 1
-    }));
-    
-    setMostrarConfigJuego(false);
-    iniciarTimer();
-    
-    // Limpiar canvas al iniciar juego
-    limpiarCanvas();
-    
-    // Notificar al servidor
-    socketRef.current?.emit('iniciar_juego', {
-      palabra: palabraAleatoria,
-      turnoActual: usuariosConectados[0].nombre,
-      tiempo: 60
-    });
   };
 
-  const iniciarTimer = () => {
-    if (gameTimerRef.current) {
-      clearInterval(gameTimerRef.current);
-    }
-    
-    gameTimerRef.current = setInterval(() => {
-      setJuegoState(prev => {
-        if (prev.tiempoRestante <= 1) {
-          // Tiempo agotado, siguiente turno
-          const indiceActual = usuariosConectados.findIndex(u => u.nombre === prev.turnoActual);
-          const siguienteIndice = (indiceActual + 1) % usuariosConectados.length;
-          const siguienteJugador = usuariosConectados[siguienteIndice];
-          
-          if (siguienteIndice === 0) {
-            // Nueva ronda
-            const nuevaPalabra = palabrasRef.current[Math.floor(Math.random() * palabrasRef.current.length)];
-            const nuevaPalabraOculta = nuevaPalabra.replace(/[a-zA-ZáéíóúÁÉÍÓÚñÑ]/g, '_');
-            
-            return {
-              ...prev,
-              ronda: prev.ronda + 1,
-              palabraActual: nuevaPalabra,
-              palabraOculta: nuevaPalabraOculta,
-              turnoActual: siguienteJugador.nombre,
-              tiempoRestante: 60
-            };
-          }
-          
-          return {
-            ...prev,
-            turnoActual: siguienteJugador.nombre,
-            tiempoRestante: 60
-          };
-        }
-        
-        return {
-          ...prev,
-          tiempoRestante: prev.tiempoRestante - 1
-        };
-      });
-    }, 1000);
-  };
 
   const verificarPalabra = (palabra: string) => {
     if (palabra.toLowerCase() === juegoState.palabraActual.toLowerCase()) {

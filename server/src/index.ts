@@ -27,6 +27,27 @@ const io = new Server(httpServer, {
 // Almacenar usuarios conectados
 const usuariosConectados = new Map<string, Usuario>();
 
+// Estado del juego global
+let estadoJuego: {
+  enJuego: boolean;
+  palabraActual: string;
+  palabraOculta: string;
+  turnoActual: string;
+  tiempoRestante: number;
+  puntuaciones: { [usuario: string]: number };
+  ronda: number;
+  maxRondas: number;
+} = {
+  enJuego: false,
+  palabraActual: '',
+  palabraOculta: '',
+  turnoActual: '',
+  tiempoRestante: 0,
+  puntuaciones: {},
+  ronda: 1,
+  maxRondas: 5
+};
+
 // Manejar conexiones de Socket.IO
 io.on('connection', (socket) => {
   console.log('✅ Usuario conectado:', socket.id);
@@ -38,6 +59,18 @@ io.on('connection', (socket) => {
     
     // Enviar lista actualizada de usuarios a todos
     io.emit('usuarios', Array.from(usuariosConectados.values()));
+    
+    // Si hay un juego en progreso, sincronizar el estado
+    if (estadoJuego.enJuego) {
+      socket.emit('juego_iniciado', {
+        palabra: estadoJuego.palabraActual,
+        turnoActual: estadoJuego.turnoActual,
+        tiempo: estadoJuego.tiempoRestante,
+        usuarios: Array.from(usuariosConectados.values()).map(u => u.nombre),
+        puntuaciones: estadoJuego.puntuaciones,
+        ronda: estadoJuego.ronda
+      });
+    }
   });
 
   // Escuchar mensajes del chat
@@ -69,17 +102,53 @@ io.on('connection', (socket) => {
   });
 
   // Escuchar inicio de juego
-  socket.on('iniciar_juego', (data: { palabra: string; turnoActual: string; tiempo: number }) => {
+  socket.on('iniciar_juego', (data: { palabra: string; turnoActual: string; tiempo: number; usuarios: string[] }) => {
     console.log('🎮 Juego iniciado:', data);
+    
+    // Actualizar estado global del juego
+    estadoJuego = {
+      enJuego: true,
+      palabraActual: data.palabra,
+      palabraOculta: data.palabra.replace(/[a-zA-ZáéíóúÁÉÍÓÚñÑ]/g, '_'),
+      turnoActual: data.turnoActual,
+      tiempoRestante: data.tiempo,
+      puntuaciones: data.usuarios.reduce((acc, user) => ({ ...acc, [user]: 0 }), {}),
+      ronda: 1,
+      maxRondas: 5
+    };
+    
+    // Crear objeto de juego con información completa
+    const juegoData = {
+      palabra: data.palabra,
+      turnoActual: data.turnoActual,
+      tiempo: data.tiempo,
+      usuarios: data.usuarios,
+      puntuaciones: estadoJuego.puntuaciones,
+      ronda: 1
+    };
+    
     // Enviar a TODOS los clientes
-    io.emit('juego_iniciado', data);
+    io.emit('juego_iniciado', juegoData);
   });
 
   // Escuchar palabra correcta
   socket.on('palabra_correcta', (data: { usuario: string; palabra: string; puntos: number }) => {
     console.log('🎯 Palabra correcta:', data);
+    
+    // Actualizar puntuaciones en el estado global
+    if (estadoJuego.enJuego) {
+      estadoJuego.puntuaciones[data.usuario] = (estadoJuego.puntuaciones[data.usuario] || 0) + data.puntos;
+    }
+    
     // Enviar a TODOS los clientes
     io.emit('palabra_adivinada', data);
+  });
+
+  // Escuchar fin de juego
+  socket.on('terminar_juego', () => {
+    console.log('🏁 Juego terminado');
+    estadoJuego.enJuego = false;
+    io.emit('juego_terminado');
   });
 
   // Manejar desconexión
