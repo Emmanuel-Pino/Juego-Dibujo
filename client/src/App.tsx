@@ -71,6 +71,8 @@ function App() {
     maxRondas: 5
   });
   const [mostrarConfigJuego, setMostrarConfigJuego] = useState(false);
+  const [mostrarCountdown, setMostrarCountdown] = useState(false);
+  const [countdown, setCountdown] = useState(3);
   
   const socketRef = useRef<Socket | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
@@ -168,12 +170,16 @@ function App() {
       try {
         console.log("🎮 Juego iniciado desde servidor:", data);
         
+        // Crear la palabra oculta
+        const palabraOculta = data.palabra.replace(/[a-zA-ZáéíóúÁÉÍÓÚñÑ]/g, '_');
+        console.log("🔤 Palabra oculta generada:", palabraOculta);
+        
         // Sincronizar el estado del juego en todos los clientes
         setJuegoState(prev => ({
           ...prev,
           enJuego: true,
           palabraActual: data.palabra,
-          palabraOculta: data.palabra.replace(/[a-zA-ZáéíóúÁÉÍÓÚñÑ]/g, '_'),
+          palabraOculta: palabraOculta,
           turnoActual: data.turnoActual,
           tiempoRestante: data.tiempo,
           puntuaciones: data.puntuaciones || {},
@@ -188,9 +194,21 @@ function App() {
         gameTimerRef.current = setInterval(() => {
           setJuegoState(prev => {
             if (prev.tiempoRestante <= 1) {
-              // Tiempo agotado - simplemente reiniciar el timer por ahora
+              // Tiempo agotado - cambiar turno
+              const usuarios = usuariosConectados.map(u => u.nombre);
+              const indiceActual = usuarios.indexOf(prev.turnoActual);
+              const siguienteIndice = (indiceActual + 1) % usuarios.length;
+              const siguienteTurno = usuarios[siguienteIndice];
+              
+              // Notificar cambio de turno al servidor
+              socketRef.current?.emit('cambiar_turno', {
+                nuevoTurno: siguienteTurno,
+                ronda: prev.ronda
+              });
+              
               return {
                 ...prev,
+                turnoActual: siguienteTurno,
                 tiempoRestante: 60
               };
             }
@@ -202,11 +220,26 @@ function App() {
           });
         }, 1000);
         
+        // Mostrar countdown antes de iniciar
+        setMostrarCountdown(true);
+        setCountdown(3);
+        
+        const countdownInterval = setInterval(() => {
+          setCountdown(prev => {
+            if (prev <= 1) {
+              clearInterval(countdownInterval);
+              setMostrarCountdown(false);
+              return 0;
+            }
+            return prev - 1;
+          });
+        }, 1000);
+        
         // Mostrar mensaje de confirmación
         setMensajes(prev => [...prev, {
           id: Date.now().toString(),
           usuario: 'Sistema',
-          texto: `🎮 ¡Juego iniciado! Es el turno de ${data.turnoActual} - Palabra: ${data.palabra.replace(/[a-zA-ZáéíóúÁÉÍÓÚñÑ]/g, '_')}`,
+          texto: `🎮 ¡Juego iniciado! Es el turno de ${data.turnoActual} - Palabra: ${palabraOculta}`,
           timestamp: new Date(),
           color: '#6366f1'
         }]);
@@ -224,6 +257,23 @@ function App() {
         texto: `🎉 ¡${data.usuario} adivinó "${data.palabra}" y ganó ${data.puntos} puntos!`,
         timestamp: new Date(),
         color: '#10b981'
+      }]);
+    });
+
+    socket.on("turno_cambiado", (data: { nuevoTurno: string; tiempo: number }) => {
+      console.log("🔄 Turno cambiado:", data);
+      setJuegoState(prev => ({
+        ...prev,
+        turnoActual: data.nuevoTurno,
+        tiempoRestante: data.tiempo || 60
+      }));
+      
+      setMensajes(prev => [...prev, {
+        id: Date.now().toString(),
+        usuario: 'Sistema',
+        texto: `🔄 Es el turno de ${data.nuevoTurno}`,
+        timestamp: new Date(),
+        color: '#6366f1'
       }]);
     });
 
@@ -289,6 +339,7 @@ function App() {
         return;
       }
       
+      // Permitir dibujar siempre, sin restricciones de turno
       setDibujando(true);
       const ctx = ctxRef.current;
       if (!ctx) return;
@@ -297,23 +348,39 @@ function App() {
       const x = e.clientX - rect.left;
       const y = e.clientY - rect.top;
       
-      // Configurar estilo del pincel
-      ctx.strokeStyle = herramienta.color;
-      ctx.lineWidth = herramienta.grosor;
-      ctx.lineCap = "round";
-      ctx.lineJoin = "round";
+      // Configurar estilo según la herramienta
+      if (herramienta.tipo === 'pincel') {
+        ctx.strokeStyle = herramienta.color;
+        ctx.lineWidth = herramienta.grosor;
+        ctx.lineCap = "round";
+        ctx.lineJoin = "round";
+        ctx.beginPath();
+        ctx.moveTo(x, y);
+      } else if (herramienta.tipo === 'borrador') {
+        ctx.globalCompositeOperation = 'destination-out';
+        ctx.lineWidth = herramienta.grosor;
+        ctx.lineCap = "round";
+        ctx.lineJoin = "round";
+        ctx.beginPath();
+        ctx.moveTo(x, y);
+      } else {
+        // Para rectángulo, círculo, línea - solo configurar estilo básico
+        ctx.strokeStyle = herramienta.color;
+        ctx.lineWidth = herramienta.grosor;
+        ctx.lineCap = "round";
+        ctx.lineJoin = "round";
+        ctx.globalCompositeOperation = 'source-over';
+      }
       
-      ctx.beginPath();
-      ctx.moveTo(x, y);
-      
-      console.log("🖊️ Empezando a dibujar en:", x, y);
+      console.log("🖊️ Empezando a dibujar en:", x, y, "con herramienta:", herramienta.tipo);
       socketRef.current?.emit("dibujo", { 
         x: x, 
         y: y, 
         type: "start",
         color: herramienta.color,
         grosor: herramienta.grosor,
-        usuario: usuario.nombre
+        usuario: usuario.nombre,
+        herramienta: herramienta.tipo
       });
     };
 
@@ -326,17 +393,21 @@ function App() {
       const x = e.clientX - rect.left;
       const y = e.clientY - rect.top;
       
-      ctx.lineTo(x, y);
-      ctx.stroke();
+      // Solo dibujar líneas para pincel y borrador
+      if (herramienta.tipo === 'pincel' || herramienta.tipo === 'borrador') {
+        ctx.lineTo(x, y);
+        ctx.stroke();
+      }
       
-      console.log("🖊️ Dibujando en:", x, y);
+      console.log("🖊️ Dibujando en:", x, y, "con herramienta:", herramienta.tipo);
       socketRef.current?.emit("dibujo", { 
         x: x, 
         y: y, 
         type: "draw",
         color: herramienta.color,
         grosor: herramienta.grosor,
-        usuario: usuario.nombre
+        usuario: usuario.nombre,
+        herramienta: herramienta.tipo
       });
     };
 
@@ -549,6 +620,46 @@ function App() {
     }
     return false;
   };
+
+  // Modal de countdown
+  if (mostrarCountdown) {
+    return (
+      <div style={{
+        position: 'fixed',
+        top: 0,
+        left: 0,
+        right: 0,
+        bottom: 0,
+        background: 'rgba(0, 0, 0, 0.8)',
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        zIndex: 2000
+      }}>
+        <div style={{
+          background: 'white',
+          borderRadius: '20px',
+          padding: '3rem',
+          textAlign: 'center',
+          boxShadow: '0 25px 50px rgba(0, 0, 0, 0.3)',
+          animation: 'pulse 0.5s ease-in-out'
+        }}>
+          <div style={{
+            fontSize: '6rem',
+            fontWeight: 'bold',
+            color: '#6366f1',
+            marginBottom: '1rem',
+            animation: 'bounce 1s infinite'
+          }}>
+            {countdown}
+          </div>
+          <h2 style={{ margin: 0, color: '#374151' }}>
+            ¡Preparados para dibujar!
+          </h2>
+        </div>
+      </div>
+    );
+  }
 
   // Modal de configuración del juego
   if (mostrarConfigJuego) {
@@ -783,10 +894,27 @@ function App() {
                       textAlign: 'center',
                       letterSpacing: '0.2em',
                       color: 'var(--primary-color)',
-                      margin: '0.5rem 0'
+                      margin: '0.5rem 0',
+                      padding: '0.5rem',
+                      background: 'var(--bg-secondary)',
+                      borderRadius: 'var(--radius-md)',
+                      border: '2px solid var(--primary-color)'
                     }}>
-                      {juegoState.palabraOculta}
+                      {usuario.nombre === juegoState.turnoActual 
+                        ? juegoState.palabraActual 
+                        : juegoState.palabraOculta || 'Cargando palabra...'}
                     </div>
+                    {usuario.nombre === juegoState.turnoActual && (
+                      <div style={{
+                        fontSize: '0.875rem',
+                        color: 'var(--success-color)',
+                        textAlign: 'center',
+                        marginTop: '0.5rem',
+                        fontWeight: '600'
+                      }}>
+                        🎯 ¡Es tu turno! Dibuja: {juegoState.palabraActual}
+                      </div>
+                    )}
                   </div>
                   
                   {/* Puntuaciones */}
