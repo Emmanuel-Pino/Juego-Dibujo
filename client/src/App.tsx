@@ -15,8 +15,10 @@ interface Mensaje {
   color: string;
 }
 
+type TipoHerramienta = 'pincel' | 'borrador' | 'rectangulo' | 'circulo' | 'linea' | 'texto';
+
 interface HerramientaDibujo {
-  tipo: 'pincel' | 'borrador' | 'rectangulo' | 'circulo' | 'linea' | 'texto';
+  tipo: TipoHerramienta;
   color: string;
   grosor: number;
 }
@@ -25,8 +27,6 @@ interface CanvasState {
   zoom: number;
   panX: number;
   panY: number;
-  capaActual: number;
-  capas: CanvasRenderingContext2D[];
 }
 
 interface JuegoState {
@@ -56,9 +56,7 @@ function App() {
   const [canvasState, setCanvasState] = useState<CanvasState>({
     zoom: 1,
     panX: 0,
-    panY: 0,
-    capaActual: 0,
-    capas: []
+    panY: 0
   });
   const [juegoState, setJuegoState] = useState<JuegoState>({
     enJuego: false,
@@ -73,6 +71,7 @@ function App() {
   const [mostrarConfigJuego, setMostrarConfigJuego] = useState(false);
   const [mostrarCountdown, setMostrarCountdown] = useState(false);
   const [countdown, setCountdown] = useState(3);
+  const [puntoInicio, setPuntoInicio] = useState<{x: number, y: number} | null>(null);
   
   const socketRef = useRef<Socket | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
@@ -83,6 +82,8 @@ function App() {
     'casa', 'perro', 'gato', 'árbol', 'sol', 'luna', 'coche', 'avión',
     'flor', 'mar', 'montaña', 'ciudad', 'libro', 'música', 'deporte', 'comida'
   ]);
+  const lastDrawTimeRef = useRef<number>(0);
+  const drawThrottleMs = 16; // ~60fps
 
   // Generar color aleatorio para el usuario
   const generarColorUsuario = () => {
@@ -121,15 +122,17 @@ function App() {
       setMensajes((prev) => [...prev, nuevoMensaje]);
     });
 
-    socket.on("dibujo", ({ x, y, type, color, grosor, usuario }: { 
+    socket.on("dibujo", ({ x, y, type, color, grosor, usuario, herramienta, puntoInicio }: { 
       x: number; 
       y: number; 
-      type: "start" | "draw" | "end";
+      type: "start" | "draw" | "end" | "shape";
       color: string;
       grosor: number;
       usuario: string;
+      herramienta?: string;
+      puntoInicio?: {x: number, y: number};
     }) => {
-      console.log("🎨 Dibujo recibido de otro cliente:", { x, y, type, color, grosor, usuario });
+      console.log("🎨 Dibujo recibido de otro cliente:", { x, y, type, color, grosor, usuario, herramienta });
       const ctx = ctxRef.current;
       if (!ctx) return;
 
@@ -137,6 +140,13 @@ function App() {
       ctx.lineWidth = grosor;
       ctx.lineCap = "round";
       ctx.lineJoin = "round";
+      
+      // Configurar globalCompositeOperation según la herramienta
+      if (herramienta === 'borrador') {
+        ctx.globalCompositeOperation = 'destination-out';
+      } else {
+        ctx.globalCompositeOperation = 'source-over';
+      }
 
       if (type === "start") {
         ctx.beginPath();
@@ -144,6 +154,27 @@ function App() {
       } else if (type === "draw") {
         ctx.lineTo(x, y);
         ctx.stroke();
+      } else if (type === "shape" && puntoInicio) {
+        // Dibujar forma geométrica
+        ctx.beginPath();
+        ctx.lineWidth = grosor;
+        if (herramienta === 'rectangulo') {
+          const width = x - puntoInicio.x;
+          const height = y - puntoInicio.y;
+          ctx.rect(puntoInicio.x, puntoInicio.y, width, height);
+        } else if (herramienta === 'circulo') {
+          const radius = Math.sqrt(Math.pow(x - puntoInicio.x, 2) + Math.pow(y - puntoInicio.y, 2));
+          ctx.arc(puntoInicio.x, puntoInicio.y, radius, 0, 2 * Math.PI);
+        } else if (herramienta === 'linea') {
+          ctx.moveTo(puntoInicio.x, puntoInicio.y);
+          ctx.lineTo(x, y);
+        }
+        ctx.stroke();
+        // Restaurar el modo normal después de dibujar la forma
+        ctx.globalCompositeOperation = 'source-over';
+      } else if (type === "end") {
+        // Restaurar el modo normal al terminar
+        ctx.globalCompositeOperation = 'source-over';
       }
     });
 
@@ -166,6 +197,7 @@ function App() {
       usuarios: string[];
       puntuaciones: { [usuario: string]: number };
       ronda: number;
+      maxRondas?: number;
     }) => {
       try {
         console.log("🎮 Juego iniciado desde servidor:", data);
@@ -183,42 +215,16 @@ function App() {
           turnoActual: data.turnoActual,
           tiempoRestante: data.tiempo,
           puntuaciones: data.puntuaciones || {},
-          ronda: data.ronda || 1
+          ronda: data.ronda || 1,
+          maxRondas: data.maxRondas || prev.maxRondas
         }));
         
-        // Iniciar el timer en todos los clientes
+        // El timer se maneja en el servidor, solo actualizamos el estado local
+        // Limpiar timer local si existe
         if (gameTimerRef.current) {
           clearInterval(gameTimerRef.current);
+          gameTimerRef.current = null;
         }
-        
-        gameTimerRef.current = setInterval(() => {
-          setJuegoState(prev => {
-            if (prev.tiempoRestante <= 1) {
-              // Tiempo agotado - cambiar turno
-              const usuarios = usuariosConectados.map(u => u.nombre);
-              const indiceActual = usuarios.indexOf(prev.turnoActual);
-              const siguienteIndice = (indiceActual + 1) % usuarios.length;
-              const siguienteTurno = usuarios[siguienteIndice];
-              
-              // Notificar cambio de turno al servidor
-              socketRef.current?.emit('cambiar_turno', {
-                nuevoTurno: siguienteTurno,
-                ronda: prev.ronda
-              });
-              
-              return {
-                ...prev,
-                turnoActual: siguienteTurno,
-                tiempoRestante: 60
-              };
-            }
-            
-            return {
-              ...prev,
-              tiempoRestante: prev.tiempoRestante - 1
-            };
-          });
-        }, 1000);
         
         // Mostrar countdown antes de iniciar
         setMostrarCountdown(true);
@@ -277,8 +283,39 @@ function App() {
       }]);
     });
 
+    socket.on("tiempo_actualizado", (data: { tiempo: number }) => {
+      setJuegoState(prev => ({
+        ...prev,
+        tiempoRestante: data.tiempo
+      }));
+    });
+
+    socket.on("puntuaciones_actualizadas", (data: { puntuaciones: { [usuario: string]: number } }) => {
+      console.log("🏆 Puntuaciones actualizadas:", data);
+      setJuegoState(prev => ({
+        ...prev,
+        puntuaciones: data.puntuaciones
+      }));
+    });
+
     socket.on("juego_terminado", () => {
       console.log("🏁 Juego terminado");
+      
+      // Determinar el ganador
+      const puntuaciones = Object.entries(juegoState.puntuaciones);
+      if (puntuaciones.length > 0) {
+        puntuaciones.sort(([,a], [,b]) => b - a);
+        const [ganador, puntosGanador] = puntuaciones[0];
+        
+        setMensajes(prev => [...prev, {
+          id: Date.now().toString(),
+          usuario: 'Sistema',
+          texto: `🏁 ¡Juego terminado! 🏆 Ganador: ${ganador} con ${puntosGanador} puntos`,
+          timestamp: new Date(),
+          color: '#10b981'
+        }]);
+      }
+      
       setJuegoState(prev => ({
         ...prev,
         enJuego: false,
@@ -293,18 +330,15 @@ function App() {
         clearInterval(gameTimerRef.current);
         gameTimerRef.current = null;
       }
-      
-      setMensajes(prev => [...prev, {
-        id: Date.now().toString(),
-        usuario: 'Sistema',
-        texto: '🏁 ¡Juego terminado! Pueden iniciar un nuevo juego.',
-        timestamp: new Date(),
-        color: '#f59e0b'
-      }]);
     });
 
     return () => {
       socket.disconnect();
+      // Limpiar timer al desmontar
+      if (gameTimerRef.current) {
+        clearInterval(gameTimerRef.current);
+        gameTimerRef.current = null;
+      }
     };
   }, []);
 
@@ -316,14 +350,15 @@ function App() {
     const ctx = canvas.getContext("2d");
     if (!ctx) return;
 
-    // Configurar estilo del canvas
+    // Configurar estilo del canvas (simplificado sin zoom/pan)
     ctx.strokeStyle = herramienta.color;
     ctx.lineWidth = herramienta.grosor;
     ctx.lineCap = "round";
     ctx.lineJoin = "round";
-    
+
     ctxRef.current = ctx;
   }, [herramienta]);
+
 
   // Eventos de dibujo simplificados
   useEffect(() => {
@@ -333,27 +368,29 @@ function App() {
     const empezarDibujo = (e: MouseEvent) => {
       if (usuario.nombre === '' || e.button !== 0) return; // Solo botón izquierdo
       
-      // Si se mantiene Ctrl, iniciar pan
-      if (e.ctrlKey || e.metaKey) {
-        iniciarPan(e.clientX, e.clientY);
+      
+      // Validar que sea el turno del usuario para dibujar
+      if (juegoState.enJuego && usuario.nombre !== juegoState.turnoActual) {
+        console.log("❌ No es tu turno para dibujar");
         return;
       }
       
-      // Permitir dibujar siempre, sin restricciones de turno
       setDibujando(true);
       const ctx = ctxRef.current;
       if (!ctx) return;
 
       const rect = canvas.getBoundingClientRect();
+      // Coordenadas simples sin transformaciones
       const x = e.clientX - rect.left;
       const y = e.clientY - rect.top;
-      
+
       // Configurar estilo según la herramienta
       if (herramienta.tipo === 'pincel') {
         ctx.strokeStyle = herramienta.color;
         ctx.lineWidth = herramienta.grosor;
         ctx.lineCap = "round";
         ctx.lineJoin = "round";
+        ctx.globalCompositeOperation = 'source-over';
         ctx.beginPath();
         ctx.moveTo(x, y);
       } else if (herramienta.tipo === 'borrador') {
@@ -363,13 +400,14 @@ function App() {
         ctx.lineJoin = "round";
         ctx.beginPath();
         ctx.moveTo(x, y);
-      } else {
-        // Para rectángulo, círculo, línea - solo configurar estilo básico
+      } else if (herramienta.tipo === 'rectangulo' || herramienta.tipo === 'circulo' || herramienta.tipo === 'linea') {
+        // Para formas geométricas - guardar punto de inicio
         ctx.strokeStyle = herramienta.color;
         ctx.lineWidth = herramienta.grosor;
         ctx.lineCap = "round";
         ctx.lineJoin = "round";
         ctx.globalCompositeOperation = 'source-over';
+        setPuntoInicio({ x, y });
       }
       
       console.log("🖊️ Empezando a dibujar en:", x, y, "con herramienta:", herramienta.tipo);
@@ -386,17 +424,29 @@ function App() {
 
     const dibujar = (e: MouseEvent) => {
       if (!dibujando || usuario.nombre === '') return;
+      
+      // Throttling para evitar demasiados eventos
+      const now = Date.now();
+      if (now - lastDrawTimeRef.current < drawThrottleMs) {
+        return;
+      }
+      lastDrawTimeRef.current = now;
+      
       const ctx = ctxRef.current;
       if (!ctx) return;
 
       const rect = canvas.getBoundingClientRect();
+      // Coordenadas simples sin transformaciones
       const x = e.clientX - rect.left;
       const y = e.clientY - rect.top;
-      
-      // Solo dibujar líneas para pincel y borrador
+
+      // Dibujar según la herramienta
       if (herramienta.tipo === 'pincel' || herramienta.tipo === 'borrador') {
         ctx.lineTo(x, y);
         ctx.stroke();
+      } else if (herramienta.tipo === 'rectangulo' || herramienta.tipo === 'circulo' || herramienta.tipo === 'linea') {
+        // Para formas geométricas - solo enviar coordenadas, no dibujar preview
+        // El dibujo real se hará al terminar
       }
       
       console.log("🖊️ Dibujando en:", x, y, "con herramienta:", herramienta.tipo);
@@ -411,24 +461,68 @@ function App() {
       });
     };
 
-    const terminarDibujo = () => {
+    const terminarDibujo = (e?: MouseEvent) => {
       if (dibujando) {
         console.log("🖊️ Terminando dibujo");
-        socketRef.current?.emit("dibujo", { 
-          x: 0, 
-          y: 0, 
-          type: "end",
-          color: herramienta.color,
-          grosor: herramienta.grosor,
-          usuario: usuario.nombre
-        });
+        
+        // Restablecer globalCompositeOperation después del borrador
+        const ctx = ctxRef.current;
+        if (ctx) {
+          ctx.globalCompositeOperation = 'source-over';
+        }
+        
+        // Finalizar formas geométricas
+        if (herramienta.tipo === 'rectangulo' || herramienta.tipo === 'circulo' || herramienta.tipo === 'linea') {
+          if (puntoInicio && e && ctx) {
+            const canvas = canvasRef.current;
+            if (canvas) {
+              const rect = canvas.getBoundingClientRect();
+              const x = e.clientX - rect.left;
+              const y = e.clientY - rect.top;
+              
+              // Dibujar la forma final
+              ctx.beginPath();
+              ctx.lineWidth = herramienta.grosor;
+              if (herramienta.tipo === 'rectangulo') {
+                const width = x - puntoInicio.x;
+                const height = y - puntoInicio.y;
+                ctx.rect(puntoInicio.x, puntoInicio.y, width, height);
+              } else if (herramienta.tipo === 'circulo') {
+                const radius = Math.sqrt(Math.pow(x - puntoInicio.x, 2) + Math.pow(y - puntoInicio.y, 2));
+                ctx.arc(puntoInicio.x, puntoInicio.y, radius, 0, 2 * Math.PI);
+              } else if (herramienta.tipo === 'linea') {
+                ctx.moveTo(puntoInicio.x, puntoInicio.y);
+                ctx.lineTo(x, y);
+              }
+              ctx.stroke();
+              
+              // Enviar forma completa al servidor
+              socketRef.current?.emit("dibujo", { 
+                x: x, 
+                y: y, 
+                type: "shape",
+                color: herramienta.color,
+                grosor: herramienta.grosor,
+                usuario: usuario.nombre,
+                herramienta: herramienta.tipo,
+                puntoInicio: puntoInicio
+              });
+            }
+          }
+          setPuntoInicio(null);
+        } else {
+          socketRef.current?.emit("dibujo", { 
+            x: 0, 
+            y: 0, 
+            type: "end",
+            color: herramienta.color,
+            grosor: herramienta.grosor,
+            usuario: usuario.nombre,
+            herramienta: herramienta.tipo
+          });
+        }
       }
       setDibujando(false);
-    };
-
-    const manejarWheel = (e: WheelEvent) => {
-      e.preventDefault();
-      hacerZoom(e.deltaY, e.clientX, e.clientY);
     };
 
     const manejarKeyDown = (e: KeyboardEvent) => {
@@ -438,21 +532,36 @@ function App() {
       }
     };
 
+    const handleMouseUp = (e: MouseEvent) => terminarDibujo(e);
+    // Prevenir comportamiento por defecto de zoom en el canvas
+    const prevenirZoomCanvas = (e: Event) => {
+      e.preventDefault();
+      e.stopPropagation();
+    };
+
+    // Prevenir menú contextual
+    const prevenirMenuContextual = (e: Event) => {
+      e.preventDefault();
+    };
+
     canvas.addEventListener("mousedown", empezarDibujo);
     canvas.addEventListener("mousemove", dibujar);
-    canvas.addEventListener("mouseup", terminarDibujo);
+    canvas.addEventListener("mouseup", handleMouseUp);
     canvas.addEventListener("mouseleave", terminarDibujo);
-    canvas.addEventListener("wheel", manejarWheel);
+    canvas.addEventListener("wheel", prevenirZoomCanvas, { passive: false });
+    canvas.addEventListener("contextmenu", prevenirMenuContextual);
     document.addEventListener("keydown", manejarKeyDown);
 
     return () => {
       canvas.removeEventListener("mousedown", empezarDibujo);
       canvas.removeEventListener("mousemove", dibujar);
-      canvas.removeEventListener("mouseup", terminarDibujo);
+      canvas.removeEventListener("mouseup", handleMouseUp);
       canvas.removeEventListener("mouseleave", terminarDibujo);
-      canvas.removeEventListener("wheel", manejarWheel);
+      canvas.removeEventListener("wheel", prevenirZoomCanvas);
+      canvas.removeEventListener("contextmenu", prevenirMenuContextual);
       document.removeEventListener("keydown", manejarKeyDown);
     };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [dibujando, herramienta, usuario.nombre]);
 
   // Auto-scroll del chat
@@ -462,22 +571,32 @@ function App() {
     }
   }, [mensajes]);
 
+  // Función para sanitizar entrada
+  const sanitizarEntrada = (texto: string): string => {
+    return texto
+      .trim()
+      .slice(0, 200) // Limitar longitud
+      .replace(/[<>]/g, '') // Remover caracteres potencialmente peligrosos
+      .replace(/\s+/g, ' '); // Normalizar espacios
+  };
+
   const enviarMensaje = () => {
-    if (input.trim() === "" || usuario.nombre === '') return;
+    const textoLimpio = sanitizarEntrada(input);
+    if (textoLimpio === "" || usuario.nombre === '') return;
     
     // Si estamos en juego, verificar si es la palabra correcta
     if (juegoState.enJuego) {
-      if (verificarPalabra(input.trim())) {
+      if (verificarPalabra(textoLimpio)) {
         // Palabra correcta, el mensaje se enviará automáticamente
         setInput("");
         return;
       }
     }
     
-    console.log("📤 Enviando mensaje:", input);
+    console.log("📤 Enviando mensaje:", textoLimpio);
     socketRef.current?.emit("mensaje", {
       usuario: usuario.nombre,
-      texto: input,
+      texto: textoLimpio,
       color: usuario.color
     });
     setInput("");
@@ -506,63 +625,13 @@ function App() {
     });
   };
 
-  // Funciones del canvas avanzado (simplificadas)
-
-  const hacerZoom = (delta: number, x: number, y: number) => {
-    const factor = delta > 0 ? 1.1 : 0.9;
-    const nuevoZoom = Math.max(0.1, Math.min(5, canvasState.zoom * factor));
-    
-    const rect = canvasRef.current?.getBoundingClientRect();
-    if (!rect) return;
-    
-    const mouseX = x - rect.left;
-    const mouseY = y - rect.top;
-    
-    const worldX = (mouseX - canvasState.panX) / canvasState.zoom;
-    const worldY = (mouseY - canvasState.panY) / canvasState.zoom;
-    
-    setCanvasState(prev => ({
-      ...prev,
-      zoom: nuevoZoom,
-      panX: mouseX - worldX * nuevoZoom,
-      panY: mouseY - worldY * nuevoZoom
-    }));
-  };
-
-  const iniciarPan = (x: number, y: number) => {
-    const rect = canvasRef.current?.getBoundingClientRect();
-    if (!rect) return;
-    
-    const startX = x - rect.left;
-    const startY = y - rect.top;
-    
-    const handleMouseMove = (e: MouseEvent) => {
-      const currentX = e.clientX - rect.left;
-      const currentY = e.clientY - rect.top;
-      
-      setCanvasState(prev => ({
-        ...prev,
-        panX: prev.panX + (currentX - startX),
-        panY: prev.panY + (currentY - startY)
-      }));
-    };
-    
-    const handleMouseUp = () => {
-      document.removeEventListener('mousemove', handleMouseMove);
-      document.removeEventListener('mouseup', handleMouseUp);
-    };
-    
-    document.addEventListener('mousemove', handleMouseMove);
-    document.addEventListener('mouseup', handleMouseUp);
-  };
+  // Funciones del canvas (simplificadas)
 
   const resetearCanvas = () => {
     setCanvasState({
       zoom: 1,
       panX: 0,
-      panY: 0,
-      capaActual: 0,
-      capas: []
+      panY: 0
     });
   };
 
@@ -586,10 +655,11 @@ function App() {
         palabra: palabraAleatoria,
         turnoActual: usuariosConectados[0].nombre,
         tiempo: 60,
-        usuarios: usuariosConectados.map(u => u.nombre)
+        usuarios: usuariosConectados.map(u => u.nombre),
+        maxRondas: juegoState.maxRondas
       });
       
-      console.log("🎮 Iniciando juego con palabra:", palabraAleatoria);
+      console.log("🎮 Iniciando juego con palabra:", palabraAleatoria, "- Rondas:", juegoState.maxRondas);
     } catch (error) {
       console.error("Error al iniciar juego:", error);
       alert("Error al iniciar el juego. Inténtalo de nuevo.");
@@ -599,21 +669,12 @@ function App() {
 
   const verificarPalabra = (palabra: string) => {
     if (palabra.toLowerCase() === juegoState.palabraActual.toLowerCase()) {
-      // Palabra correcta
-      const puntos = Math.max(10, 60 - juegoState.tiempoRestante);
-      setJuegoState(prev => ({
-        ...prev,
-        puntuaciones: {
-          ...prev.puntuaciones,
-          [prev.turnoActual]: (prev.puntuaciones[prev.turnoActual] || 0) + puntos
-        }
-      }));
-      
-      // Notificar a todos
+      // Palabra correcta - solo notificar al servidor
+      // El servidor se encargará de calcular puntos y sincronizar con todos los clientes
       socketRef.current?.emit('palabra_correcta', {
-        usuario: juegoState.turnoActual,
+        usuario: usuario.nombre,
         palabra: juegoState.palabraActual,
-        puntos
+        tiempoRestante: juegoState.tiempoRestante
       });
       
       return true;
@@ -945,6 +1006,21 @@ function App() {
                         ))}
                     </div>
                   </div>
+                  
+                  {/* Botón para terminar juego */}
+                  <div style={{ marginTop: '1rem' }}>
+                    <button
+                      className="btn btn-danger btn-sm"
+                      onClick={() => {
+                        if (window.confirm('¿Estás seguro de que quieres terminar el juego?')) {
+                          socketRef.current?.emit('terminar_juego');
+                        }
+                      }}
+                      style={{ width: '100%', fontSize: '0.875rem' }}
+                    >
+                      🛑 Terminar Juego
+                    </button>
+                  </div>
                 </div>
               </div>
             )}
@@ -1075,7 +1151,7 @@ function App() {
                     </label>
                     <select
                       value={herramienta.tipo}
-                      onChange={(e) => setHerramienta(prev => ({ ...prev, tipo: e.target.value as any }))}
+                      onChange={(e) => setHerramienta(prev => ({ ...prev, tipo: e.target.value as TipoHerramienta }))}
                       style={{
                         padding: '0.5rem',
                         border: '1px solid var(--border-color)',
@@ -1091,24 +1167,26 @@ function App() {
                     </select>
                   </div>
 
-                  {/* Color */}
-                  <div>
-                    <label style={{ display: 'block', marginBottom: '0.5rem', fontSize: '0.875rem', fontWeight: '500' }}>
-                      Color
-                    </label>
-                    <input
-                      type="color"
-                      value={herramienta.color}
-                      onChange={(e) => setHerramienta(prev => ({ ...prev, color: e.target.value }))}
-                      style={{
-                        width: '50px',
-                        height: '40px',
-                        border: 'none',
-                        borderRadius: 'var(--radius-md)',
-                        cursor: 'pointer'
-                      }}
-                    />
-      </div>
+                  {/* Color - Solo mostrar si no es borrador */}
+                  {herramienta.tipo !== 'borrador' && (
+                    <div>
+                      <label style={{ display: 'block', marginBottom: '0.5rem', fontSize: '0.875rem', fontWeight: '500' }}>
+                        Color
+                      </label>
+                      <input
+                        type="color"
+                        value={herramienta.color}
+                        onChange={(e) => setHerramienta(prev => ({ ...prev, color: e.target.value }))}
+                        style={{
+                          width: '50px',
+                          height: '40px',
+                          border: 'none',
+                          borderRadius: 'var(--radius-md)',
+                          cursor: 'pointer'
+                        }}
+                      />
+                    </div>
+                  )}
 
                   {/* Grosor */}
       <div>
@@ -1127,55 +1205,23 @@ function App() {
 
                   {/* Controles de canvas */}
                   <div style={{ marginLeft: 'auto', display: 'flex', gap: '0.5rem', alignItems: 'center' }}>
-                    <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '0.25rem' }}>
-                      <span style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>Zoom</span>
-                      <div style={{ display: 'flex', gap: '0.25rem' }}>
-                        <button
-                          className="btn btn-sm"
-                          onClick={() => hacerZoom(-100, 400, 250)}
-                          disabled={usuario.nombre === ''}
-                          style={{ padding: '0.25rem 0.5rem' }}
-                        >
-                          ➖
-                        </button>
-                        <span style={{ 
-                          fontSize: '0.75rem', 
-                          padding: '0.25rem 0.5rem',
-                          background: 'var(--bg-secondary)',
-                          borderRadius: 'var(--radius-sm)',
-                          minWidth: '40px',
-                          textAlign: 'center'
-                        }}>
-                          {Math.round(canvasState.zoom * 100)}%
-                        </span>
-                        <button
-                          className="btn btn-sm"
-                          onClick={() => hacerZoom(100, 400, 250)}
-                          disabled={usuario.nombre === ''}
-                          style={{ padding: '0.25rem 0.5rem' }}
-                        >
-                          ➕
-                        </button>
-                      </div>
-                    </div>
-                    
                     <button
                       className="btn btn-secondary btn-sm"
                       onClick={resetearCanvas}
                       disabled={usuario.nombre === ''}
-                      title="Resetear zoom y posición (Ctrl+R)"
+                      title="Resetear canvas"
                     >
                       🔄 Reset
                     </button>
-                    
-          <button 
+
+                    <button
                       className="btn btn-danger"
-            onClick={limpiarCanvas}
+                      onClick={limpiarCanvas}
                       disabled={usuario.nombre === ''}
-          >
-            🗑️ Limpiar
-          </button>
-        </div>
+                    >
+                      🗑️ Limpiar
+                    </button>
+                  </div>
                 </div>
               </div>
             </div>
@@ -1186,7 +1232,7 @@ function App() {
                 <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                   <h3 style={{ margin: 0 }}>🎨 Canvas de Dibujo</h3>
                   <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>
-                    🖱️ Rueda: Zoom | Ctrl+Click: Pan | Ctrl+R: Reset
+                    🖱️ Ctrl+R: Reset Canvas
                   </div>
                 </div>
               </div>
@@ -1196,33 +1242,22 @@ function App() {
                   width={800}
                   height={500}
                   className="canvas-responsive"
-          style={{ 
+          style={{
                     border: '2px solid var(--border-color)',
-                    cursor: dibujando ? 'crosshair' : (canvasState.zoom !== 1 ? 'grab' : 'default'),
+                    cursor: dibujando ? 'crosshair' : 'crosshair',
                     borderRadius: 'var(--radius-lg)',
                     backgroundColor: 'white',
                     boxShadow: 'var(--shadow-lg)',
                     maxWidth: '100%',
-                    maxHeight: '100%'
+                    maxHeight: '100%',
+                    touchAction: 'none',
+                    userSelect: 'none',
+                    WebkitUserSelect: 'none',
+                    MozUserSelect: 'none',
+                    msUserSelect: 'none'
                   }}
                 />
                 
-                {/* Indicador de zoom */}
-                {canvasState.zoom !== 1 && (
-                  <div style={{
-                    position: 'absolute',
-                    top: '10px',
-                    right: '10px',
-                    background: 'rgba(0, 0, 0, 0.7)',
-                    color: 'white',
-                    padding: '0.25rem 0.5rem',
-                    borderRadius: 'var(--radius-sm)',
-                    fontSize: '0.75rem',
-                    fontWeight: '500'
-                  }}>
-                    Zoom: {Math.round(canvasState.zoom * 100)}%
-                  </div>
-                )}
               </div>
             </div>
           </div>
