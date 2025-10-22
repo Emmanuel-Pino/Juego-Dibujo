@@ -52,6 +52,18 @@ let estadoJuego: {
   indiceTurno: 0
 };
 
+// Historial de todos los trazos dibujados (para sincronizar nuevos usuarios)
+let historialCanvas: Array<{
+  x: number;
+  y: number;
+  type: "start" | "draw" | "end" | "shape";
+  color: string;
+  grosor: number;
+  usuario: string;
+  herramienta?: string;
+  puntoInicio?: { x: number; y: number };
+}> = [];
+
 // Timer del juego
 let gameTimer: NodeJS.Timeout | null = null;
 
@@ -141,6 +153,9 @@ function cambiarTurno() {
   
   // Limpiar el canvas para el nuevo turno
   io.emit('limpiar_canvas');
+  // NUEVO: Limpiar historial del canvas
+historialCanvas = [];
+console.log('📝 Historial del canvas limpiado para nuevo turno');
   
   // Notificar a todos los clientes sobre el nuevo turno
   io.emit('juego_iniciado', {
@@ -180,27 +195,33 @@ function finalizarJuego() {
 io.on('connection', (socket) => {
   console.log('✅ Usuario conectado:', socket.id);
 
-  // Escuchar configuración de usuario
-  socket.on('usuario_conectado', (usuario: Usuario) => {
-    console.log('👤 Usuario configurado:', usuario);
-    usuariosConectados.set(socket.id, { ...usuario, id: socket.id });
-    
-    // Enviar lista actualizada de usuarios a todos
-    io.emit('usuarios', Array.from(usuariosConectados.values()));
-    
-    // Si hay un juego en progreso, sincronizar el estado
-    if (estadoJuego.enJuego) {
-      socket.emit('juego_iniciado', {
-        palabra: estadoJuego.palabraActual,
-        turnoActual: estadoJuego.turnoActual,
-        tiempo: estadoJuego.tiempoRestante,
-        usuarios: Array.from(usuariosConectados.values()).map(u => u.nombre),
-        puntuaciones: estadoJuego.puntuaciones,
-        ronda: estadoJuego.ronda,
-        maxRondas: estadoJuego.maxRondas
-      });
-    }
-  });
+ // Escuchar configuración de usuario
+socket.on('usuario_conectado', (usuario: Usuario) => {
+  console.log('👤 Usuario configurado:', usuario);
+  usuariosConectados.set(socket.id, { ...usuario, id: socket.id });
+  
+  // Enviar lista actualizada de usuarios a todos
+  io.emit('usuarios', Array.from(usuariosConectados.values()));
+  
+  // NUEVO: Enviar historial del canvas al usuario que acaba de conectarse
+  if (historialCanvas.length > 0) {
+    console.log(`📤 Enviando ${historialCanvas.length} trazos del historial a`, usuario.nombre);
+    socket.emit('sincronizar_canvas', { historial: historialCanvas });
+  }
+  
+  // Si hay un juego en progreso, sincronizar el estado
+  if (estadoJuego.enJuego) {
+    socket.emit('juego_iniciado', {
+      palabra: estadoJuego.palabraActual,
+      turnoActual: estadoJuego.turnoActual,
+      tiempo: estadoJuego.tiempoRestante,
+      usuarios: Array.from(usuariosConectados.values()).map(u => u.nombre),
+      puntuaciones: estadoJuego.puntuaciones,
+      ronda: estadoJuego.ronda,
+      maxRondas: estadoJuego.maxRondas
+    });
+  }
+});
 
   // Escuchar mensajes del chat
   socket.on('mensaje', (data: { usuario: string; texto: string; color: string }) => {
@@ -221,16 +242,27 @@ io.on('connection', (socket) => {
     puntoInicio?: { x: number; y: number };
   }) => {
     console.log('🎨 Dibujo recibido:', data, 'de', socket.id);
+    
+    // NUEVO: Guardar en el historial (excepto eventos 'end' que son solo control)
+    if (data.type !== 'end') {
+      historialCanvas.push(data);
+    }
+    
     // Enviar a TODOS LOS DEMÁS clientes (excepto el que dibuja)
     socket.broadcast.emit('dibujo', data);
   });
 
   // Escuchar limpieza de canvas
-  socket.on('limpiar_canvas', () => {
-    console.log('🗑️ Canvas limpiado por:', socket.id);
-    // Enviar a TODOS LOS DEMÁS clientes
-    socket.broadcast.emit('limpiar_canvas');
-  });
+socket.on('limpiar_canvas', () => {
+  console.log('🗑️ Canvas limpiado por:', socket.id);
+  
+  // NUEVO: Limpiar el historial del canvas
+  historialCanvas = [];
+  console.log('📝 Historial del canvas limpiado');
+  
+  // Enviar a TODOS LOS DEMÁS clientes
+  socket.broadcast.emit('limpiar_canvas');
+});
 
   // Escuchar inicio de juego
   socket.on('iniciar_juego', (data: { palabra: string; turnoActual: string; tiempo: number; usuarios: string[]; maxRondas?: number }) => {

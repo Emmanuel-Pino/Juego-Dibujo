@@ -23,11 +23,7 @@ interface HerramientaDibujo {
   grosor: number;
 }
 
-interface CanvasState {
-  zoom: number;
-  panX: number;
-  panY: number;
-}
+
 
 interface JuegoState {
   enJuego: boolean;
@@ -53,11 +49,6 @@ function App() {
   });
   const [dibujando, setDibujando] = useState(false);
   const [usuariosConectados, setUsuariosConectados] = useState<Usuario[]>([]);
-  const [canvasState, setCanvasState] = useState<CanvasState>({
-    zoom: 1,
-    panX: 0,
-    panY: 0
-  });
   const [juegoState, setJuegoState] = useState<JuegoState>({
     enJuego: false,
     palabraActual: '',
@@ -332,6 +323,73 @@ function App() {
       }
     });
 
+    //Codigo sincronizar canvas
+    
+    socket.on("sincronizar_canvas", (data: { historial: Array<{
+      x: number;
+      y: number;
+      type: "start" | "draw" | "end" | "shape";
+      color: string;
+      grosor: number;
+      usuario: string;
+      herramienta?: string;
+      puntoInicio?: { x: number; y: number };
+    }> }) => {
+      console.log("🔄 Sincronizando canvas con", data.historial.length, "trazos");
+      
+      const ctx = ctxRef.current;
+      const canvas = canvasRef.current;
+      if (!ctx || !canvas) return;
+      
+      // Limpiar canvas antes de redibujar
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      
+      // Reproducir todo el historial
+      data.historial.forEach((trazo) => {
+        ctx.strokeStyle = trazo.color;
+        ctx.lineWidth = trazo.grosor;
+        ctx.lineCap = "round";
+        ctx.lineJoin = "round";
+        
+        // Configurar modo según herramienta
+        if (trazo.herramienta === 'borrador') {
+          ctx.globalCompositeOperation = 'destination-out';
+        } else {
+          ctx.globalCompositeOperation = 'source-over';
+        }
+        
+        if (trazo.type === "start") {
+          ctx.beginPath();
+          ctx.moveTo(trazo.x, trazo.y);
+        } else if (trazo.type === "draw") {
+          ctx.lineTo(trazo.x, trazo.y);
+          ctx.stroke();
+        } else if (trazo.type === "shape" && trazo.puntoInicio) {
+          ctx.beginPath();
+          if (trazo.herramienta === 'rectangulo') {
+            const width = trazo.x - trazo.puntoInicio.x;
+            const height = trazo.y - trazo.puntoInicio.y;
+            ctx.rect(trazo.puntoInicio.x, trazo.puntoInicio.y, width, height);
+          } else if (trazo.herramienta === 'circulo') {
+            const radius = Math.sqrt(
+              Math.pow(trazo.x - trazo.puntoInicio.x, 2) + 
+              Math.pow(trazo.y - trazo.puntoInicio.y, 2)
+            );
+            ctx.arc(trazo.puntoInicio.x, trazo.puntoInicio.y, radius, 0, 2 * Math.PI);
+          } else if (trazo.herramienta === 'linea') {
+            ctx.moveTo(trazo.puntoInicio.x, trazo.puntoInicio.y);
+            ctx.lineTo(trazo.x, trazo.y);
+          }
+          ctx.stroke();
+        }
+        
+        // Restaurar modo normal
+        ctx.globalCompositeOperation = 'source-over';
+      });
+      
+      console.log("✅ Canvas sincronizado correctamente");
+    });
+
     return () => {
       socket.disconnect();
       // Limpiar timer al desmontar
@@ -350,11 +408,12 @@ function App() {
     const ctx = canvas.getContext("2d");
     if (!ctx) return;
 
-    // Configurar estilo del canvas (simplificado sin zoom/pan)
+    // Configurar estilo del canvas
     ctx.strokeStyle = herramienta.color;
     ctx.lineWidth = herramienta.grosor;
     ctx.lineCap = "round";
     ctx.lineJoin = "round";
+    ctx.globalCompositeOperation = 'source-over';
 
     ctxRef.current = ctx;
   }, [herramienta]);
@@ -386,31 +445,23 @@ function App() {
 
       // Configurar estilo según la herramienta
       if (herramienta.tipo === 'pincel') {
-        ctx.strokeStyle = herramienta.color;
-        ctx.lineWidth = herramienta.grosor;
-        ctx.lineCap = "round";
-        ctx.lineJoin = "round";
         ctx.globalCompositeOperation = 'source-over';
         ctx.beginPath();
         ctx.moveTo(x, y);
+        console.log("🖌️ Configurando pincel - grosor:", herramienta.grosor, "color:", herramienta.color);
       } else if (herramienta.tipo === 'borrador') {
         ctx.globalCompositeOperation = 'destination-out';
-        ctx.lineWidth = herramienta.grosor;
-        ctx.lineCap = "round";
-        ctx.lineJoin = "round";
         ctx.beginPath();
         ctx.moveTo(x, y);
       } else if (herramienta.tipo === 'rectangulo' || herramienta.tipo === 'circulo' || herramienta.tipo === 'linea') {
         // Para formas geométricas - guardar punto de inicio
-        ctx.strokeStyle = herramienta.color;
-        ctx.lineWidth = herramienta.grosor;
-        ctx.lineCap = "round";
-        ctx.lineJoin = "round";
         ctx.globalCompositeOperation = 'source-over';
         setPuntoInicio({ x, y });
       }
       
       console.log("🖊️ Empezando a dibujar en:", x, y, "con herramienta:", herramienta.tipo);
+      
+      // Enviar al servidor para sincronizar con otros clientes
       socketRef.current?.emit("dibujo", { 
         x: x, 
         y: y, 
@@ -525,12 +576,7 @@ function App() {
       setDibujando(false);
     };
 
-    const manejarKeyDown = (e: KeyboardEvent) => {
-      if (e.key === 'r' && (e.ctrlKey || e.metaKey)) {
-        e.preventDefault();
-        resetearCanvas();
-      }
-    };
+    
 
     const handleMouseUp = (e: MouseEvent) => terminarDibujo(e);
     // Prevenir comportamiento por defecto de zoom en el canvas
@@ -544,13 +590,22 @@ function App() {
       e.preventDefault();
     };
 
+    // Prevenir zoom con Ctrl+scroll
+    const prevenirZoomConCtrl = (e: KeyboardEvent) => {
+      if (e.ctrlKey && (e.key === '+' || e.key === '-' || e.key === '0')) {
+        e.preventDefault();
+      }
+    };
+
     canvas.addEventListener("mousedown", empezarDibujo);
     canvas.addEventListener("mousemove", dibujar);
     canvas.addEventListener("mouseup", handleMouseUp);
     canvas.addEventListener("mouseleave", terminarDibujo);
     canvas.addEventListener("wheel", prevenirZoomCanvas, { passive: false });
     canvas.addEventListener("contextmenu", prevenirMenuContextual);
-    document.addEventListener("keydown", manejarKeyDown);
+    canvas.addEventListener("keydown", prevenirZoomConCtrl);
+   
+    document.addEventListener("keydown", prevenirZoomConCtrl);
 
     return () => {
       canvas.removeEventListener("mousedown", empezarDibujo);
@@ -559,7 +614,8 @@ function App() {
       canvas.removeEventListener("mouseleave", terminarDibujo);
       canvas.removeEventListener("wheel", prevenirZoomCanvas);
       canvas.removeEventListener("contextmenu", prevenirMenuContextual);
-      document.removeEventListener("keydown", manejarKeyDown);
+      canvas.removeEventListener("keydown", prevenirZoomConCtrl);
+      document.removeEventListener("keydown", prevenirZoomConCtrl);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [dibujando, herramienta, usuario.nombre]);
@@ -625,15 +681,7 @@ function App() {
     });
   };
 
-  // Funciones del canvas (simplificadas)
-
-  const resetearCanvas = () => {
-    setCanvasState({
-      zoom: 1,
-      panX: 0,
-      panY: 0
-    });
-  };
+  
 
   // Funciones del juego
   const iniciarJuego = () => {
@@ -1205,14 +1253,7 @@ function App() {
 
                   {/* Controles de canvas */}
                   <div style={{ marginLeft: 'auto', display: 'flex', gap: '0.5rem', alignItems: 'center' }}>
-                    <button
-                      className="btn btn-secondary btn-sm"
-                      onClick={resetearCanvas}
-                      disabled={usuario.nombre === ''}
-                      title="Resetear canvas"
-                    >
-                      🔄 Reset
-                    </button>
+                    
 
                     <button
                       className="btn btn-danger"
@@ -1254,7 +1295,8 @@ function App() {
                     userSelect: 'none',
                     WebkitUserSelect: 'none',
                     MozUserSelect: 'none',
-                    msUserSelect: 'none'
+                    msUserSelect: 'none',
+                    imageRendering: 'pixelated' 
                   }}
                 />
                 
